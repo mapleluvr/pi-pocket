@@ -139,9 +139,35 @@ export interface ExtensionCommand {
 /** What browsers know about a command. The id changes when its module reloads successfully. */
 export type CommandInfo = Omit<ExtensionCommand, "handler"> & { id: string; file: string };
 
+/** A module's optional native GUI. The component renders inside Pocket's Sheet. */
+export interface ExtensionSheet {
+    title: string;
+    /** Relative to the directory module's web folder. */
+    entry?: string;
+    wide?: boolean;
+}
+
+/** A Sheet's private call. It has an authenticated owner, but no conversation or model context. */
+export type ExtensionRpc = (
+    action: string,
+    payload: unknown,
+    context: { readonly user: Readonly<Pick<User, "id" | "name" | "role">> },
+) => unknown | Promise<unknown>;
+
+/** What the browser needs to open one accepted generation of a module's GUI. */
+export interface SheetInfo {
+    moduleId: string;
+    generation: string;
+    title: string;
+    entry: string;
+    wide: boolean;
+}
+
 /** What the app gives its extensions. Extensions are reloaded on edit; the host is not. */
 export interface PocketHost {
     readonly commands: { register(command: ExtensionCommand): void };
+    readonly sheets: { register(sheet: ExtensionSheet): void };
+    readonly rpc: { handle(handler: ExtensionRpc): void };
     readonly guard: LancetGuard;
     readonly approvals: Approvals;
     readonly agentDir: string;

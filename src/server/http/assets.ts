@@ -50,8 +50,9 @@ const IMAGE_EXTENSIONS = new Set([
     ".svg",
 ]);
 const MAX_IMAGE_FILE = 25 * 1024 * 1024;
+
 /** Opened on its own, an SVG could run script: give it an opaque origin and nothing to load. */
-const IMAGE_CSP =
+export const IMAGE_CSP =
     "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:";
 
 /** The image type of a file's first bytes, or undefined when it is not an image this app shows. */

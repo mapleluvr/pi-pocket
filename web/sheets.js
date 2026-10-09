@@ -5,6 +5,7 @@ import { NotificationsSheet } from "./notify.js";
 import { ShareSheet } from "./share.js";
 import { AppearanceSheet } from "./sheets/appearance.js";
 import { BranchPicker } from "./sheets/branch.js";
+import { ExtensionSheet } from "./sheets/extension.js";
 import { ExtensionsSheet } from "./sheets/extensions.js";
 import { FileSheet } from "./sheets/file.js";
 import { FindSheet } from "./sheets/find.js";
@@ -132,6 +133,9 @@ function sheetBody(sheet) {
             break;
         case "extensions":
             body = html`<${ExtensionsSheet} />`;
+            break;
+        case "extension":
+            body = html`<${ExtensionSheet} sheet=${sheet} />`;
             break;
         case "image":
             body = html`<${ImageViewer} src=${sheet.src} alt=${sheet.alt} />`;

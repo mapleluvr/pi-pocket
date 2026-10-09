@@ -15,7 +15,8 @@ Some state lives in this process alone, and a restart forgets it. For example:
 - which tool calls wait for approval;
 - the browser's pages;
 - when each run ended, which peek tiles use;
-- provider sign-ins in progress.
+- provider sign-ins in progress;
+- accepted extension GUI generations and RPC calls still in flight.
 
 ## Who owns what
 
@@ -23,7 +24,7 @@ Some state lives in this process alone, and a restart forgets it. For example:
 
 **Its parts:**
 
-- `commands`, `extensionCommands`, `collab`, `alerts`, `providers`, `schedules`, `goals`, `shell`, `spend`
+- `commands`, `extensionCommands`, `extensionSheets`, `collab`, `alerts`, `providers`, `schedules`, `goals`, `shell`, `spend`
 - `workspace`, `transcripts`, `attribution`
 - `browsers`
 
@@ -125,6 +126,22 @@ A returned card becomes a `pocket.command` entry with only `kind` and `data`: no
 The composer uses its existing command-selection and execution path. Built-ins remain protected; before a new native invocation it refreshes the template list so a same-name template is not silently replaced. An unacknowledged invocation keeps its original registration and request id in tab-local session storage. Native suggestions retain the selected full command name; dispatch matches expanded paste content, not its placeholder. Transport errors do not clear the request, and malformed receipts or unreadable saved requests do not fall through to a model submission. While someone else drives, the owner can still enter global commands, but cannot use that input for conversation commands or messages.
 
 Running now reads the task graph and the command's stored name and scope, never its arguments. Global commands are hidden from other people there. Its stop route checks access and task ownership before requesting cancellation; stopping does not undo external effects.
+
+## Native extension GUIs
+
+Directory modules (`<module>/index.ts`) keep their directory name as their identity; existing `.ts` modules keep their filename and enablement key. During the synchronous factory, `reload.ts` collects commands, at most one sheet, and an optional RPC handler. It validates them and fingerprints the sheet's `web/` files before publishing a generation. A failed build keeps the previous accepted registration. Removal also invalidates pending imports; a late import cannot reinstall a deleted or disabled module.
+
+`app.extensionSheets` is a process-local service, not another durable executor. The owner's `hello` includes accepted sheet metadata; other people get no such metadata. Changes refresh connected tabs. The API and service check ownership, and the service reads the person's current role before dispatch. There is no conversation, visibility, or driver context for a GUI call.
+
+`GET /api/extensions/:module/assets/:generation/*` serves only accepted files. The loader records real paths and SHA-256 fingerprints; the request resolves the path again and checks the very buffer returned to HTTP. A changed or moved asset is rejected rather than sent under an old generation. The route uses explicit MIME types, `nosniff`, and the existing SVG/image CSP. It does not preserve old asset copies or publish arbitrary backend files.
+
+`POST /api/extensions/:module/rpc` reuses authentication, `X-Pocket`, and `readJson`. The body carries `generation`, a nonempty `action`, and optional `payload`. Dispatch binds the accepted handler before awaiting it; reload does not redirect an admitted call. Success is HTTP 200 with `{ ok: true, data }`, normalizing `undefined` to `null`. Handler and serialization failures are caught here and become only `{ error: "extension_error" }` with HTTP 500, without sending the original exception to the outer HTTP logger. Other access, generation, and input errors use the existing API error path.
+
+The service creates no task, document, entry, or receipt. It has no retry, cancellation endpoint, handler deadline, queue, or RPC-specific response quota. The extension owns its data volume, I/O limits, and write consistency. A lost response or a closed interface says nothing about whether an external effect completed.
+
+`web/sheets/extension.js` plugs into the existing sheet stack. It owns the container and a fresh instance binding, loads only the accepted entry, and gives content an `rpc`/`notify`/`close` context. Stale imports and RPC completions cannot affect a replacement instance. The SDK checks the success envelope even for 2xx; import, render, and RPC failures use fixed feedback without raw exception values. A document that has imported a module must fully refresh before importing its next generation, because unmounting does not clear ESM caches. The host blocks reuse and offers refresh; it does not refresh unrelated tabs silently.
+
+This is not a security sandbox. Backend extensions have owner machine rights, and frontend code shares the app's origin. Credential-handling extensions must keep secrets out of model and Durable data, use private storage outside `web/`, and return only non-sensitive state. The unchanged [custom notifier](examples/custom-notifier/README.md) is the tested example, not a core business service.
 
 ## The web app
 

@@ -5,7 +5,7 @@
 import { readdirSync, statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { homedir, networkInterfaces } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, extname, join } from "node:path";
 import QRCode from "qrcode";
 import { MAX_PEEKS } from "../app.ts";
 import {
@@ -23,11 +23,11 @@ import type { User } from "../config.ts";
 import { HttpError } from "../errors.ts";
 import { desktopTheme, wallpaperFile } from "../omarchy.ts";
 import { runningNow } from "../running.ts";
-import { serveImage } from "./assets.ts";
+import { IMAGE_CSP, serveImage, TYPES } from "./assets.ts";
 import { browserRoutes } from "./browser-routes.ts";
 import { conversationRoutes } from "./conversation-routes.ts";
 import { createEventStreams } from "./events.ts";
-import { type ApiRequest, conversationId, type HttpOptions, json, readJson } from "./io.ts";
+import { type ApiRequest, conversationId, type HttpOptions, json, readJson, send } from "./io.ts";
 import { pushRoutes } from "./push-routes.ts";
 
 /** This machine's non-internal IPv4 addresses, for invite links other devices on its networks can open. */
@@ -388,6 +388,41 @@ export function createApi(options: HttpOptions, auth: Auth) {
             }
 
             return json(response, 200, { ok: true });
+        }
+
+        if (
+            first === "extensions" &&
+            second !== undefined &&
+            third === "assets" &&
+            fourth !== undefined &&
+            parts.length > 4 &&
+            method === "GET"
+        ) {
+            requireOwner(user);
+            const body = app.extensionSheets.asset(user, second, fourth, parts.slice(4));
+            const extension = extname(parts.at(-1)!).toLowerCase();
+
+            return send(
+                response,
+                200,
+                body,
+                TYPES[extension],
+                extension === ".svg" ? { "content-security-policy": IMAGE_CSP } : {},
+            );
+        }
+
+        if (
+            first === "extensions" &&
+            second !== undefined &&
+            third === "rpc" &&
+            parts.length === 3 &&
+            method === "POST"
+        ) {
+            requireOwner(user);
+            const body = await readJson<unknown>(request);
+            const result = await app.extensionSheets.call(user, second, body);
+
+            return send(response, 200, result, "application/json");
         }
 
         if (first === "extensions" && second === undefined && method === "GET") {

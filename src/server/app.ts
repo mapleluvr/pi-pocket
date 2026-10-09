@@ -56,6 +56,7 @@ import {
 } from "./docs.ts";
 import { describe, HttpError } from "./errors.ts";
 import { ExtensionCommands } from "./extension-commands.ts";
+import { ExtensionSheets } from "./extension-sheets.ts";
 import { Goals } from "./goals.ts";
 import { type ApprovalRequest, Approvals, type PocketHost } from "./host.ts";
 import { type GuardStatus, LancetGuard } from "./lancet.ts";
@@ -130,6 +131,7 @@ export class PocketApp {
     loader!: ExtensionLoader;
     readonly commands = new Commands(this);
     readonly extensionCommands = new ExtensionCommands(this);
+    readonly extensionSheets = new ExtensionSheets(this);
     readonly collab = new Collab(this);
     readonly alerts = new Alerts(this);
     readonly providers = new Providers(this);
@@ -260,7 +262,7 @@ export class PocketApp {
                 tasks: [ResendTask, this.shell.task, this.extensionCommands.task],
             }),
         );
-        const host: Omit<PocketHost, "commands"> = {
+        const host: Omit<PocketHost, "commands" | "sheets" | "rpc"> = {
             guard: this.guard,
             approvals: this.approvals,
             agentDir: getAgentDir(),
@@ -1085,6 +1087,7 @@ export class PocketApp {
                 home: homedir(),
                 defaultCwd: this.defaultCwd,
                 extensions: this.loader.extensionNames(),
+                extensionSheets: user.role === "owner" ? this.loader.sheets() : [],
                 extensionCommands: this.loader
                     .commands()
                     .filter(

@@ -1,6 +1,6 @@
 /**
- * Live editing. Extension modules are imported again when they change and installed under the same names, which
- * replaces them in one step: a tool call already running finishes on the old code, the next one uses the new code.
+ * Live editing. Changed extension modules are imported again and installed under the same names. A tool call
+ * already running finishes on the old code; later calls use the current registry.
  * Web files only need the browsers to reload.
  *
  * Modules come from two folders: Pi Pocket's own (`src/server/extensions/`), and the owner's drop-ins
@@ -21,11 +21,20 @@ import {
     symlinkSync,
     watch,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Extension, Registry } from "@earendil-works/pi-durable";
 import { describe } from "./errors.ts";
-import type { CommandInfo, ExtensionCommand, ExtensionModule, PocketHost } from "./host.ts";
+import { isSheetAsset, loadSheet, type LoadedSheet } from "./extension-sheets.ts";
+import type {
+    CommandInfo,
+    ExtensionCommand,
+    ExtensionModule,
+    ExtensionRpc,
+    ExtensionSheet,
+    PocketHost,
+    SheetInfo,
+} from "./host.ts";
 
 /** Built-in extension modules, in install order. Other `.ts` files in the directory load after them, by name. */
 const ORDER = [
@@ -125,19 +134,31 @@ export interface ExtensionInfo {
     error?: string;
 }
 
-type Module = { file: string; directory: string; source: ModuleSource };
+type Module = { file: string; directory: string; path: string; source: ModuleSource };
 
 export type RegisteredCommand = CommandInfo & Pick<ExtensionCommand, "handler">;
 
-/** Extension modules in a folder: `.ts` files, except tests and files starting with `_`. A missing folder has none. */
+/** Single-file modules keep their filenames; directory modules use their directory name as the key. */
 function moduleFiles(directory: string): string[] {
     try {
-        return readdirSync(directory).filter(
-            (file) => file.endsWith(".ts") && !file.endsWith(".test.ts") && !file.startsWith("_"),
-        );
+        return readdirSync(directory, { withFileTypes: true })
+            .filter((entry) =>
+                entry.isDirectory()
+                    ? /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(entry.name) &&
+                      entry.name !== "node_modules" &&
+                      existsSync(join(directory, entry.name, "index.ts"))
+                    : entry.name.endsWith(".ts") &&
+                      !entry.name.endsWith(".test.ts") &&
+                      !entry.name.startsWith("_"),
+            )
+            .map((entry) => entry.name);
     } catch {
         return [];
     }
+}
+
+function modulePath(directory: string, file: string): string {
+    return file.endsWith(".ts") ? join(directory, file) : join(directory, file, "index.ts");
 }
 
 /**
@@ -173,15 +194,16 @@ type LoadVersion = { id: string; module: Module | undefined };
 
 export class ExtensionLoader {
     readonly #registry: Registry;
-    readonly #host: Omit<PocketHost, "commands">;
+    readonly #host: Omit<PocketHost, "commands" | "sheets" | "rpc">;
     readonly #builtIn: string;
     readonly #dropIn: string | undefined;
     readonly #choice: (file: string) => boolean | undefined;
     /** Installed extensions and their source: deleting an ignored drop-in must not unload a built-in. */
     readonly #installed = new Map<string, { module: Module; extensions: Extension[] }>();
     readonly #commands = new Map<string, RegisteredCommand[]>();
+    readonly #sheets = new Map<string, LoadedSheet>();
     readonly #loading = new Map<string, LoadVersion>();
-    readonly #commandsChanged: () => Promise<void>;
+    readonly #discoveryChanged: () => Promise<void>;
     readonly #errors = new Map<string, string>();
     readonly #timers = new Map<string, NodeJS.Timeout>();
     /** Drop-ins already reported for having a built-in module's name, so each is reported once. */
@@ -195,17 +217,17 @@ export class ExtensionLoader {
      */
     constructor(
         registry: Registry,
-        host: Omit<PocketHost, "commands">,
+        host: Omit<PocketHost, "commands" | "sheets" | "rpc">,
         folders: { builtIn: string; dropIn?: string },
         choice: (file: string) => boolean | undefined = () => undefined,
-        commandsChanged: () => Promise<void> = () => Promise.resolve(),
+        discoveryChanged: () => Promise<void> = () => Promise.resolve(),
     ) {
         this.#registry = registry;
         this.#host = host;
         this.#builtIn = folders.builtIn;
         this.#dropIn = folders.dropIn;
         this.#choice = choice;
-        this.#commandsChanged = commandsChanged;
+        this.#discoveryChanged = discoveryChanged;
     }
 
     /** Every module, built-in ones first in install order. A drop-in with a built-in's name is left out. */
@@ -221,11 +243,17 @@ export class ExtensionLoader {
             ...builtIn.map((file) => ({
                 file,
                 directory: this.#builtIn,
+                path: modulePath(this.#builtIn, file),
                 source: "built-in" as const,
             })),
             ...dropIns
                 .filter((file) => !builtIn.includes(file))
-                .map((file) => ({ file, directory: this.#dropIn!, source: "drop-in" as const })),
+                .map((file) => ({
+                    file,
+                    directory: this.#dropIn!,
+                    path: modulePath(this.#dropIn!, file),
+                    source: "drop-in" as const,
+                })),
         ];
     }
 
@@ -325,14 +353,15 @@ export class ExtensionLoader {
             this.#registry.uninstall(extension);
         }
 
-        const hadCommands = (this.#commands.get(file)?.length ?? 0) > 0;
+        const changed = (this.#commands.get(file)?.length ?? 0) > 0 || this.#sheets.has(file);
 
         this.#installed.delete(file);
         this.#commands.delete(file);
+        this.#sheets.delete(file);
         this.#errors.delete(file);
 
-        if (hadCommands) {
-            await this.#commandsChanged();
+        if (changed) {
+            await this.#discoveryChanged();
         }
     }
 
@@ -348,10 +377,12 @@ export class ExtensionLoader {
 
             return {
                 file,
-                title: TITLES[file] ?? file.replace(/\.ts$/, ""),
+                title:
+                    (Object.hasOwn(TITLES, file) ? TITLES[file] : undefined) ??
+                    file.replace(/\.ts$/, ""),
                 source: module.source,
-                ...(module.source === "drop-in" ? { path: join(module.directory, file) } : {}),
-                summary: summary(join(module.directory, file)),
+                ...(module.source === "drop-in" ? { path: module.path } : {}),
+                summary: summary(module.path),
                 enabled: this.#isOn(module),
                 required: REQUIRED.has(file),
                 extensions: (this.#installed.get(file)?.extensions ?? []).map((extension) => ({
@@ -372,6 +403,15 @@ export class ExtensionLoader {
     /** Commands offered by the modules that loaded, without their server-side handlers. */
     commands(): CommandInfo[] {
         return [...this.#commands.values()].flat().map(({ handler: _handler, ...info }) => info);
+    }
+
+    /** GUIs offered by installed modules. */
+    sheets(): SheetInfo[] {
+        return [...this.#sheets.values()].map(({ info }) => ({ ...info }));
+    }
+
+    sheet(moduleId: string): LoadedSheet | undefined {
+        return this.#sheets.get(moduleId);
     }
 
     /** Resolve one exact registration, rather than running a different module after a stale browser choice. */
@@ -413,9 +453,7 @@ export class ExtensionLoader {
             return [];
         }
 
-        const url =
-            pathToFileURL(join(module.directory, file)).href +
-            (cacheBust ? `?v=${version.id}` : "");
+        const url = pathToFileURL(module.path).href + (cacheBust ? `?v=${version.id}` : "");
         const loaded = (await import(url)) as ExtensionModule;
         const current = this.#module(file);
 
@@ -434,12 +472,77 @@ export class ExtensionLoader {
         }
 
         const commands: RegisteredCommand[] = [];
+        let sheet: Required<ExtensionSheet> | undefined;
+        let rpc: ExtensionRpc | undefined;
         let collecting = true;
         let built: ReturnType<ExtensionModule["default"]>;
 
         try {
             built = loaded.default({
                 ...this.#host,
+                sheets: {
+                    register: (definition) => {
+                        if (!collecting) {
+                            throw new Error(
+                                "Register the Sheet while the module builds, not afterwards.",
+                            );
+                        }
+
+                        if (sheet !== undefined) {
+                            throw new Error("A module may register only one Sheet.");
+                        }
+
+                        if (file.endsWith(".ts")) {
+                            throw new Error("A Sheet needs a directory module with a web folder.");
+                        }
+
+                        if (definition === null || typeof definition !== "object") {
+                            throw new Error(
+                                "A Sheet needs a title and an optional relative entry.",
+                            );
+                        }
+
+                        const { title, entry = "sheet.js", wide = false } = definition;
+
+                        if (
+                            typeof title !== "string" ||
+                            title.trim() === "" ||
+                            typeof wide !== "boolean"
+                        ) {
+                            throw new Error(
+                                "A Sheet needs a nonempty title and a boolean wide flag.",
+                            );
+                        }
+
+                        if (
+                            typeof entry !== "string" ||
+                            /[\\\\:]/.test(entry) ||
+                            !/\.m?js$/.test(entry) ||
+                            entry.split("/").some((part) => !part || part === "." || part === "..")
+                        ) {
+                            throw new Error(
+                                "A Sheet entry must be a relative JavaScript file under web.",
+                            );
+                        }
+
+                        sheet = { title, entry, wide };
+                    },
+                },
+                rpc: {
+                    handle: (handler) => {
+                        if (!collecting) {
+                            throw new Error(
+                                "Register RPC while the module builds, not afterwards.",
+                            );
+                        }
+
+                        if (rpc !== undefined || typeof handler !== "function") {
+                            throw new Error("A module may register one RPC handler function.");
+                        }
+
+                        rpc = handler;
+                    },
+                },
                 commands: {
                     register: (command) => {
                         if (!collecting) {
@@ -512,6 +615,14 @@ export class ExtensionLoader {
             collecting = false;
         }
 
+        if (rpc !== undefined && sheet === undefined) {
+            throw new Error("Register a Sheet before publishing its RPC handler.");
+        }
+
+        const gui =
+            sheet === undefined
+                ? undefined
+                : loadSheet(file, version.id, dirname(module.path), sheet, rpc);
         const extensions = (Array.isArray(built) ? built : [built]) as Extension[];
 
         if (module.source === "drop-in") {
@@ -530,14 +641,25 @@ export class ExtensionLoader {
             }
         }
 
-        const commandsChanged = commands.length > 0 || (this.#commands.get(file)?.length ?? 0) > 0;
+        const changed =
+            commands.length > 0 ||
+            (this.#commands.get(file)?.length ?? 0) > 0 ||
+            sheet !== undefined ||
+            this.#sheets.has(file);
 
         this.#installed.set(file, { module, extensions });
         this.#commands.set(file, commands);
+
+        if (gui !== undefined) {
+            this.#sheets.set(file, gui);
+        } else {
+            this.#sheets.delete(file);
+        }
+
         this.#errors.delete(file);
 
-        if (commandsChanged) {
-            await this.#commandsChanged();
+        if (changed) {
+            await this.#discoveryChanged();
         }
 
         return extensions;
@@ -603,11 +725,51 @@ export class ExtensionLoader {
 
             try {
                 this.#watchers.push(
-                    watch(
-                        directory,
-                        (_event, name) =>
-                            name !== null && this.#changed(basename(name.toString()), directory),
-                    ),
+                    watch(directory, { recursive: true }, (event, name) => {
+                        if (name === null) {
+                            return;
+                        }
+
+                        const parts = name.toString().replaceAll("\\", "/").split("/");
+                        const [file, child] = parts;
+                        let isDirectory = false;
+
+                        try {
+                            isDirectory = lstatSync(join(directory, ...parts)).isDirectory();
+                        } catch {
+                            // A removal can still refer to an accepted asset or directory below.
+                        }
+
+                        // Windows also reports parent-directory changes for private child writes.
+                        if (event === "change" && isDirectory) {
+                            return;
+                        }
+
+                        if (
+                            file === undefined ||
+                            parts.includes("node_modules") ||
+                            parts.some((part) => part.startsWith(".")) ||
+                            (child !== undefined && child !== "index.ts" && child !== "web")
+                        ) {
+                            return;
+                        }
+
+                        if (
+                            child === "web" &&
+                            parts.length > 2 &&
+                            !isDirectory &&
+                            !isSheetAsset(parts.join("/"))
+                        ) {
+                            const prefix = parts.slice(2).join("/") + "/";
+                            const previousAssets = this.#sheets.get(file)?.assets.keys() ?? [];
+
+                            if (![...previousAssets].some((asset) => asset.startsWith(prefix))) {
+                                return;
+                            }
+                        }
+
+                        this.#changed(file, directory);
+                    }),
                 );
             } catch (error) {
                 this.#host.notice(
@@ -619,7 +781,11 @@ export class ExtensionLoader {
     }
 
     #changed(file: string, directory: string): void {
-        if (!file.endsWith(".ts") || file.endsWith(".test.ts") || file.startsWith("_")) {
+        if (
+            file.endsWith(".test.ts") ||
+            file.startsWith("_") ||
+            (!file.endsWith(".ts") && !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(file))
+        ) {
             return;
         }
 
@@ -631,7 +797,7 @@ export class ExtensionLoader {
 
         // Removal belongs to the directory that installed or is importing the module, not just its basename.
         if (
-            !existsSync(join(directory, file)) &&
+            !existsSync(modulePath(directory, file)) &&
             (this.#installed.get(file)?.module.directory === directory ||
                 this.#loading.get(file)?.module?.directory === directory)
         ) {

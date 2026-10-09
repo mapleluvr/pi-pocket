@@ -1,6 +1,6 @@
 // Extensions: the modules the owner can turn on and off, Lancet Guard, and who may allow risky calls.
 import { useEffect, useState } from "preact/hooks";
-import { api, attempt, closeSheet, store } from "../store.js";
+import { api, attempt, closeSheet, openSheet, store } from "../store.js";
 import { html, Loader, Sheet, shortPath, Switch } from "../ui.js";
 
 /** What Lancet Guard does here, given the module's switch and Pi's own setting. */
@@ -111,13 +111,18 @@ export function ExtensionsSheet() {
 
     return html`<${Sheet} title="Extensions" onClose=${closeSheet}>
         <p class="muted small">
-            Extensions give Pi its tools and checks in Pi Pocket. A change applies to every session right away and stays after restarts.${owner ? "" : " Only the owner can change them."}
+            Extensions add tools, checks, and interfaces to Pi Pocket. A change applies to every session right away and stays after restarts.${owner ? "" : " Only the owner can change them."}
         </p>
         ${problem && html`<div class="error-box">${problem}</div>`}
         ${!data && !problem && html`<${Loader} label="Loading extensions" />`}
         ${data?.modules.map((module) => {
             const tools = module.extensions.flatMap((extension) => extension.tools);
             const note = module.file === "guard.ts" ? guardNote(module, data.guard) : null;
+            const gui =
+                owner &&
+                store.state.server?.extensionSheets?.find(
+                    (sheet) => sheet.moduleId === module.file,
+                );
 
             return html`<div class=${`extension ${module.enabled ? "" : "off"}`}>
                 <div class="extension-main">
@@ -143,6 +148,17 @@ export function ExtensionsSheet() {
                     </div>
                 </div>
                 <div class="extension-actions">
+                    ${
+                        gui &&
+                        html`<button
+                        class="button"
+                        aria-label=${`Open ${gui.title}`}
+                        disabled=${busy !== null}
+                        onClick=${() => openSheet({ type: "extension", id: module.file, definition: gui })}
+                    >
+                        Open
+                    </button>`
+                    }
                     <${Switch}
                         on=${module.enabled}
                         disabled=${!owner || module.required || busy !== null}
@@ -166,7 +182,7 @@ export function ExtensionsSheet() {
         ${
             data?.dropIns &&
             html`<p class="muted small">
-                Add your own: put a <span class="mono">.ts</span> extension module in <span class="mono">${shortPath(data.dropIns, store.state.server?.home)}</span>. Drop-ins stay off until the owner turns them on, and run inside the server with the owner's rights.
+                Add your own: put a <span class="mono">.ts</span> module or a folder with <span class="mono">index.ts</span> in <span class="mono">${shortPath(data.dropIns, store.state.server?.home)}</span>. Drop-ins stay off until the owner turns them on, and run inside the server with the owner's rights.
             </p>`
         }
     <//>`;
